@@ -1,4 +1,4 @@
-package determinist
+package determinism
 
 import (
 	"sort"
@@ -6,8 +6,22 @@ import (
 )
 
 var DefaultIdentRefs = IdentRefs{
+	"os.Stderr":  true,
+	"os.Stdin":   true,
+	"os.Stdout":  true,
 	"time.Now":   true,
 	"time.Sleep": true,
+	// We mark these as deterministic since they give so many false positives
+	// "(*fmt.pp).printValue": false,
+	"(reflect.Value).Interface": false,
+	"runtime.Caller":            false,
+	// We are considering the global pseudorandom as non-deterministic by default
+	// since it's global (even if they set a seed), but we allow use of a manually
+	// instantiated random instance that may have a localized, fixed seed
+	"math/rand.globalRand": true,
+	// Even though the global crypto rand reader var can be replaced, it's good
+	// to disallow it by default
+	"crypto/rand.Reader": true,
 }
 
 type IdentRefs map[string]bool

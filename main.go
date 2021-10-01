@@ -1,10 +1,10 @@
 package main
 
 import (
-	"github.com/cretz/temporal-determinist/determinist"
-	"golang.org/x/tools/go/analysis/singlechecker"
+	"github.com/cretz/temporal-determinist/determinism"
+	"golang.org/x/tools/go/analysis/multichecker"
 )
 
 func main() {
-	singlechecker.Main(&determinist.New(determinist.Config{}).Analyzer)
+	multichecker.Main(determinism.NewAnalyzer(determinism.Config{}))
 }
