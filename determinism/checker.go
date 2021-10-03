@@ -12,56 +12,51 @@ import (
 	"golang.org/x/tools/go/types/typeutil"
 )
 
+// Config is config for NewChecker.
 type Config struct {
 	// If empty, uses DefaultIdentRefs.
 	DefaultIdentRefs IdentRefs
-	// If empty, does not log debug. If present, logs debug regardless of flags.
-	Debugf func(string, ...interface{})
+	// If nil, uses log.Printf.
+	DebugfFunc func(string, ...interface{})
+	// Must be set to true to see advanced debug logs.
+	Debug bool
 }
 
-type analyzer struct {
-	identRefs            IdentRefs
-	identRefOverrideFlag IdentRefs
-
-	debugf    func(string, ...interface{})
-	debugFlag bool
+// Checker is a checker that can run analysis passes to check for
+// non-deterministic code.
+type Checker struct {
+	IdentRefs  IdentRefs
+	DebugfFunc func(string, ...interface{})
+	Debug      bool
 }
 
-func NewAnalyzer(config Config) *analysis.Analyzer {
-	a := &analyzer{
-		identRefs:            config.DefaultIdentRefs,
-		identRefOverrideFlag: IdentRefs{},
-		debugf:               config.Debugf,
-		debugFlag:            config.Debugf != nil,
+// NewChecker creates a Checker for the given config.
+func NewChecker(config Config) *Checker {
+	// Set default refs and clone
+	if config.DefaultIdentRefs == nil {
+		config.DefaultIdentRefs = DefaultIdentRefs
 	}
-	// Use default ident refs if none set
-	if len(a.identRefs) == 0 {
-		a.identRefs = DefaultIdentRefs
+	config.DefaultIdentRefs = config.DefaultIdentRefs.Clone()
+	// Default debug
+	if config.DebugfFunc == nil {
+		config.DebugfFunc = log.Printf
 	}
-	// Clone the ident refs
-	a.identRefs = a.identRefs.Clone()
-	// Build analyzer
-	ret := &analysis.Analyzer{
-		Name:       "determinism",
-		Doc:        "Analyzes all functions and marks whether they are deterministic",
-		Run:        a.run,
-		ResultType: reflect.TypeOf((*Result)(nil)),
-		FactTypes:  []analysis.Fact{&NonDeterminisms{}},
+	// Build checker
+	return &Checker{
+		IdentRefs:  config.DefaultIdentRefs,
+		DebugfFunc: config.DebugfFunc,
+		Debug:      config.Debug,
 	}
-	// Set flag for ident ref overrides
-	ret.Flags.Var(a.identRefOverrideFlag, "ident-refs",
-		"comma-separated list of functions or vars to include or exclude, overriding the default "+
-			"(append '=false' to exclude)")
-	ret.Flags.BoolVar(&a.debugFlag, "debug", a.debugFlag, "show debug output")
-	return ret
 }
 
+// Result is the result from Run and the result on the Analyzer.
 type Result struct {
 	// Only includes top-level functions
 	Funcs map[*types.Func]NonDeterminisms
 }
 
-func (r *Result) Dump() (lines []string) {
+// Dump returns the result as a set of lines.
+func (r *Result) Dump(includePos bool) (lines []string) {
 	// Get func types and sort first for determinism
 	funcTypes := make([]*types.Func, 0, len(r.Funcs))
 	for funcType := range r.Funcs {
@@ -70,38 +65,46 @@ func (r *Result) Dump() (lines []string) {
 	sort.Slice(funcTypes, func(i, j int) bool { return funcTypes[i].FullName() < funcTypes[j].FullName() })
 	// Build lines
 	for _, funcType := range funcTypes {
-		for _, reason := range r.Funcs[funcType] {
-			lines = append(lines, funcType.FullName()+" is non-deterministic, reason: "+reason.String())
-			// Dump the child tree too
-			if funcCall, _ := reason.(*ReasonFuncCall); funcCall != nil {
-				lines = funcCall.appendChildReasonLines(lines, 1)
-			}
-		}
+		lines = r.Funcs[funcType].AppendChildReasonLines(funcType.FullName(), lines, 0, includePos)
 	}
 	return
 }
 
-func (a *analyzer) run(pass *analysis.Pass) (interface{}, error) {
-	// Override ident refs with overrides (safe to do repeatedly)
-	for k, v := range a.identRefOverrideFlag {
-		a.identRefs[k] = v
+// NewAnalyzer creates a Go analysis analyzer that can be used in existing
+// tools. There is a -set-decl flag for adding ident refs overrides and a
+// -determinism-debug flag for enabling debug logs. The result is Result and the
+// facts on functions are *NonDeterminisms.
+func (c *Checker) NewAnalyzer() *analysis.Analyzer {
+	a := &analysis.Analyzer{
+		Name:       "determinism",
+		Doc:        "Analyzes all functions and marks whether they are deterministic",
+		Run:        func(p *analysis.Pass) (interface{}, error) { return c.Run(p) },
+		ResultType: reflect.TypeOf((*Result)(nil)),
+		FactTypes:  []analysis.Fact{&NonDeterminisms{}},
 	}
-	// Set debugf based on flag _only_ if not already set
-	if a.debugf == nil {
-		if a.debugFlag {
-			a.debugf = log.Printf
-		} else {
-			a.debugf = func(string, ...interface{}) {}
-		}
+	// Set flags
+	a.Flags.Var(NewIdentRefsFlag(c.IdentRefs), "set-decl",
+		"qualified function/var to include/exclude, overriding the default (append '=false' to exclude)")
+	a.Flags.BoolVar(&c.Debug, "determism-debug", c.Debug, "show debug output")
+	return a
+}
+
+func (c *Checker) debugf(f string, v ...interface{}) {
+	if c.Debug {
+		c.DebugfFunc(f, v...)
 	}
-	a.debugf("Checking package %v", pass.Pkg.Name())
+}
+
+// Run executes this checker for the given pass and returns the result.
+func (c *Checker) Run(pass *analysis.Pass) (*Result, error) {
+	c.debugf("Checking package %v", pass.Pkg.Path())
 	// Collect all non-determinisms in the package
 	res := &Result{Funcs: map[*types.Func]NonDeterminisms{}}
-	a.findNonDeterminisms(pass, res)
+	c.findNonDeterminisms(pass, res)
 	return res, nil
 }
 
-func (a *analyzer) findNonDeterminisms(pass *analysis.Pass, res *Result) {
+func (c *Checker) findNonDeterminisms(pass *analysis.Pass, res *Result) {
 	// Collect all top-level func decls and their types. Also mark var decls as
 	// non-deterministic if pattern matches.
 	funcDecls := map[*types.Func]*ast.FuncDecl{}
@@ -120,8 +123,8 @@ func (a *analyzer) findNonDeterminisms(pass *analysis.Pass, res *Result) {
 						for _, varName := range valueSpec.Names {
 							if varType, _ := pass.TypesInfo.ObjectOf(varName).(*types.Var); varType != nil && varType.Pkg() != nil {
 								fullName := varType.Pkg().Path() + "." + varType.Name()
-								if a.identRefs[fullName] {
-									a.debugf("Marking %v as non-determistic because it matched a pattern", fullName)
+								if c.IdentRefs[fullName] {
+									c.debugf("Marking %v as non-determistic because it matched a pattern", fullName)
 									pos := pass.Fset.Position(varType.Pos())
 									reasons := NonDeterminisms{&ReasonDecl{reasonBase: reasonBase{&pos}}}
 									pass.ExportObjectFact(varType, &reasons)
@@ -136,7 +139,7 @@ func (a *analyzer) findNonDeterminisms(pass *analysis.Pass, res *Result) {
 	// Walk the decls capturing non-deterministic ones
 	parents := map[*types.Func]bool{}
 	for funcType := range funcDecls {
-		a.applyNonDeterminisms(pass, funcType, funcDecls, parents, res.Funcs)
+		c.applyNonDeterminisms(pass, funcType, funcDecls, parents, res.Funcs)
 	}
 	// Set non-empty non-determisms as facts
 	for funcType, nonDet := range res.Funcs {
@@ -149,7 +152,7 @@ func (a *analyzer) findNonDeterminisms(pass *analysis.Pass, res *Result) {
 
 // Returns true if non-deterministic, false otherwise. Parents must be non-nil
 // and all values must be true.
-func (a *analyzer) applyNonDeterminisms(
+func (c *Checker) applyNonDeterminisms(
 	pass *analysis.Pass,
 	fn *types.Func,
 	packageDecls map[*types.Func]*ast.FuncDecl,
@@ -169,12 +172,12 @@ func (a *analyzer) applyNonDeterminisms(
 	}
 	// Check if matches pattern
 	var skip bool
-	if match, ok := a.identRefs[fn.FullName()]; match {
-		a.debugf("Marking %v as non-determistic because it matched a pattern", fn.FullName())
+	if match, ok := c.IdentRefs[fn.FullName()]; match {
+		c.debugf("Marking %v as non-determistic because it matched a pattern", fn.FullName())
 		pos := pass.Fset.Position(fn.Pos())
 		reasons = append(reasons, &ReasonDecl{reasonBase: reasonBase{&pos}})
 	} else if ok && !match {
-		a.debugf("Skipping %v because it matched a pattern", fn.FullName())
+		c.debugf("Skipping %v because it matched a pattern", fn.FullName())
 		skip = true
 	}
 	// If not skipped and has top-level decl, walk the declaration body checking
@@ -187,18 +190,18 @@ func (a *analyzer) applyNonDeterminisms(
 				if callee, _ := typeutil.Callee(pass.TypesInfo, n).(*types.Func); callee != nil {
 					// Put self on parents, then remove
 					parents[fn] = true
-					calleeNonDet := a.applyNonDeterminisms(pass, callee, packageDecls, parents, results)
+					calleeNonDet := c.applyNonDeterminisms(pass, callee, packageDecls, parents, results)
 					delete(parents, fn)
 					// If the callee is non-deterministic, mark this as such
 					if len(calleeNonDet) > 0 {
-						a.debugf("Marking %v as non-determistic because it calls %v", fn.FullName(), callee.FullName())
+						c.debugf("Marking %v as non-determistic because it calls %v", fn.FullName(), callee.FullName())
 						pos := pass.Fset.Position(n.Pos())
 						reasons = append(reasons, &ReasonFuncCall{reasonBase: reasonBase{&pos}, Func: callee, Child: calleeNonDet})
 					}
 				}
 			case *ast.GoStmt:
 				// Any go statement is non-deterministic
-				a.debugf("Marking %v as non-determistic because it starts a goroutine", fn.FullName())
+				c.debugf("Marking %v as non-determistic because it starts a goroutine", fn.FullName())
 				pos := pass.Fset.Position(n.Pos())
 				reasons = append(reasons, &ReasonConcurrency{reasonBase: reasonBase{&pos}, Kind: ConcurrencyKindGo})
 			case *ast.Ident:
@@ -206,7 +209,7 @@ func (a *analyzer) applyNonDeterminisms(
 				if varType, _ := pass.TypesInfo.ObjectOf(n).(*types.Var); varType != nil {
 					var ignore NonDeterminisms
 					if pass.ImportObjectFact(varType, &ignore) {
-						a.debugf("Marking %v as non-determistic because it accesses %v.%v",
+						c.debugf("Marking %v as non-determistic because it accesses %v.%v",
 							fn.FullName(), varType.Pkg().Path(), varType.Name())
 						pos := pass.Fset.Position(n.Pos())
 						reasons = append(reasons, &ReasonVarAccess{reasonBase: reasonBase{&pos}, Var: varType})
@@ -225,23 +228,23 @@ func (a *analyzer) applyNonDeterminisms(
 				}
 				switch rangeType.(type) {
 				case *types.Map:
-					a.debugf("Marking %v as non-determistic because it iterates over a map", fn.FullName())
+					c.debugf("Marking %v as non-determistic because it iterates over a map", fn.FullName())
 					pos := pass.Fset.Position(n.Pos())
 					reasons = append(reasons, &ReasonMapRange{reasonBase: reasonBase{&pos}})
 				case *types.Chan:
-					a.debugf("Marking %v as non-determistic because it iterates over a channel", fn.FullName())
+					c.debugf("Marking %v as non-determistic because it iterates over a channel", fn.FullName())
 					pos := pass.Fset.Position(n.Pos())
 					reasons = append(reasons, &ReasonConcurrency{reasonBase: reasonBase{&pos}, Kind: ConcurrencyKindRange})
 				}
 			case *ast.SendStmt:
 				// Any send statement is non-deterministic
-				a.debugf("Marking %v as non-determistic because it sends to a channel", fn.FullName())
+				c.debugf("Marking %v as non-determistic because it sends to a channel", fn.FullName())
 				pos := pass.Fset.Position(n.Pos())
 				reasons = append(reasons, &ReasonConcurrency{reasonBase: reasonBase{&pos}, Kind: ConcurrencyKindSend})
 			case *ast.UnaryExpr:
 				// If the operator is a receive, it is non-deterministic
 				if n.Op == token.ARROW {
-					a.debugf("Marking %v as non-determistic because it receives from a channel", fn.FullName())
+					c.debugf("Marking %v as non-determistic because it receives from a channel", fn.FullName())
 					pos := pass.Fset.Position(n.Pos())
 					reasons = append(reasons, &ReasonConcurrency{reasonBase: reasonBase{&pos}, Kind: ConcurrencyKindRecv})
 				}

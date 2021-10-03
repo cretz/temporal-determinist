@@ -16,7 +16,7 @@ func Test(t *testing.T) {
 	results := analysistest.Run(
 		t,
 		analysistest.TestData(),
-		determinism.NewAnalyzer(determinism.Config{DefaultIdentRefs: identRefs, Debugf: t.Logf}),
+		determinism.NewChecker(determinism.Config{DefaultIdentRefs: identRefs}).NewAnalyzer(),
 		"a",
 	)
 	if testing.Verbose() {
@@ -24,7 +24,7 @@ func Test(t *testing.T) {
 		for _, result := range results {
 			if result.Pass.Pkg.Name() == "a" {
 				if res, _ := result.Result.(*determinism.Result); res != nil {
-					for _, line := range res.Dump() {
+					for _, line := range res.Dump(false) {
 						t.Log(line)
 					}
 				}

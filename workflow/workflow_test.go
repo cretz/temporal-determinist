@@ -8,10 +8,12 @@ import (
 )
 
 func Test(t *testing.T) {
+	// This intentionally only does a few tests. Most of the tests for
+	// non-determinism are in ../determinism/determinism_test.go.
 	analysistest.Run(
 		t,
 		analysistest.TestData(),
-		workflow.NewAnalyzer(workflow.Config{Debugf: t.Logf}),
+		workflow.NewChecker(workflow.Config{}).NewAnalyzer(),
 		"a",
 	)
 }
