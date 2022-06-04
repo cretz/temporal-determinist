@@ -1,3 +1,5 @@
+**THIS REPO IS NO LONGER ACTIVE AND HAS BEEN MERGED UPSTREAM TO https://github.com/temporalio/sdk-go/tree/master/contrib/tools/workflowcheck**
+
 # Temporal Determinist
 
 Temporal Determinist is a tool that statically analyzes
